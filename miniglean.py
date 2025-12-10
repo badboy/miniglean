@@ -34,11 +34,15 @@ class Metric:
         global GLEAN_DB
         pings = self.send_in_pings
 
+        cur = GLEAN_DB.cursor()
+
         labels = ''
         if self.label:
             labels = self.label
+            label_cnt = cur.execute("SELECT COUNT(DISTINCT labels) FROM telemetry WHERE id = ?1", [self.name]).fetchone()[0]
+            if label_cnt >= 16:
+                labels = "__other__"
 
-        cur = GLEAN_DB.cursor()
         for ping in pings:
             print(f"Recording for {self.name} in {ping}")
             value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3", [self.name, ping, labels]).fetchone()
@@ -68,7 +72,6 @@ class Ping:
 
         data = {}
         for row in cur.execute("SELECT id, value, labels FROM telemetry WHERE ping = ?1", [self.name]).fetchall():
-            print(row)
             id, value, labels = row
             if labels:
                 if id not in data:
@@ -79,7 +82,7 @@ class Ping:
 
         cur.execute("DELETE FROM telemetry WHERE ping = ?1 AND lifetime = 'ping'", [self.name])
 
-        print(json.dumps(data))
+        print("payload:", json.dumps(data))
         GLEAN_DB.commit()
 
 class Counter(Metric):
@@ -106,7 +109,9 @@ c.add(2)
 c.add(2)
 
 lc = LabeledCounter("errors", "ping")
-lc.get("starts").add(1)
+
+for i in range(20):
+    lc.get(f"label{i}").add(1)
 
 s = StringMetric("reason", "ping")
 s.set("cli")
