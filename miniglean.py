@@ -22,20 +22,26 @@ class Metric:
     name: str
     lifetime: str
     send_in_pings: [str]
+    label: str
 
     def __init__(self, name, lifetime, send_in_pings=None):
         self.name = name
         self.lifetime = lifetime
         self.send_in_pings = send_in_pings or ["metrics"]
+        self.label = None
 
     def record(self, fn):
         global GLEAN_DB
         pings = self.send_in_pings
 
+        labels = ''
+        if self.label:
+            labels = self.label
+
         cur = GLEAN_DB.cursor()
         for ping in pings:
             print(f"Recording for {self.name} in {ping}")
-            value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ''", [self.name, ping]).fetchone()
+            value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3", [self.name, ping, labels]).fetchone()
             newvalue = fn(value and value[0])
             cur.execute("""
                 INSERT INTO telemetry (id, ping, lifetime, labels, value, updated_at)
@@ -45,7 +51,7 @@ class Metric:
                 self.name,
                 ping,
                 self.lifetime,
-                '',
+                labels,
                 newvalue,
             ])
         GLEAN_DB.commit()
@@ -62,6 +68,7 @@ class Ping:
 
         data = {}
         for row in cur.execute("SELECT id, value, labels FROM telemetry WHERE ping = ?1", [self.name]).fetchall():
+            print(row)
             id, value, labels = row
             if labels:
                 if id not in data:
@@ -79,12 +86,30 @@ class Counter(Metric):
     def add(self, amount=1):
         self.record(lambda value: int(value or 0)+amount)
 
+
+class LabeledCounter(Metric):
+    def get(self, label):
+        c = Counter(self.name, self.lifetime, self.send_in_pings)
+        c.label = label
+        return c
+
+
+class StringMetric(Metric):
+    def set(self, value):
+        self.record(lambda _: value)
+
 c = Counter("starts", "user")
 c.add()
 
 c = Counter("clicks", "ping")
 c.add(2)
 c.add(2)
+
+lc = LabeledCounter("errors", "ping")
+lc.get("starts").add(1)
+
+s = StringMetric("reason", "ping")
+s.set("cli")
 
 metrics_ping = Ping("metrics")
 metrics_ping.submit()
