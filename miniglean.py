@@ -2,7 +2,9 @@
 
 import sqlite3
 import json
+from datetime import datetime
 
+GLEAN_START_TIME = datetime.now()
 GLEAN_DB = sqlite3.connect("glean.db")
 GLEAN_DB.execute('pragma journal_mode=wal')
 GLEAN_DB.execute("""
@@ -17,6 +19,25 @@ CREATE TABLE IF NOT EXISTS telemetry(
 )
 """)
 GLEAN_DB.commit()
+
+def get_ping_info(ping: str):
+    global GLEAN_START_TIME
+
+    seq = Counter(f"sequence#{ping}", "user", ["glean_ping_info"])
+    seq.add(1)
+
+    start_time = StringMetric(f"start#{ping}", "user", ["glean_ping_info"])
+    st = start_time.get_value() or str(GLEAN_START_TIME)
+
+    end_time = str(datetime.now())
+    start_time.set(end_time)
+
+    ping_info = {
+        "seq": seq.get_value(),
+        "start_time": st,
+        "end_time": end_time,
+    }
+    return ping_info
 
 class Metric:
     name: str
@@ -44,7 +65,7 @@ class Metric:
                 labels = "__other__"
 
         for ping in pings:
-            print(f"Recording for {self.name} in {ping}")
+            # print(f"Recording for {self.name} in {ping}")
             value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3", [self.name, ping, labels]).fetchone()
             newvalue = fn(value and value[0])
             cur.execute("""
@@ -60,6 +81,18 @@ class Metric:
             ])
         GLEAN_DB.commit()
 
+    def get_value(self, ping=None):
+        global GLEAN_DB
+        ping = ping or self.send_in_pings[0]
+
+        cur = GLEAN_DB.cursor()
+
+        labels = ''
+        if self.label:
+            labels = self.label
+
+        value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3", [self.name, ping, labels]).fetchone()
+        return value and value[0]
 
 class Ping:
     name: str
@@ -70,19 +103,24 @@ class Ping:
     def submit(self):
         cur = GLEAN_DB.cursor()
 
-        data = {}
+        metrics = {}
         for row in cur.execute("SELECT id, value, labels FROM telemetry WHERE ping = ?1", [self.name]).fetchall():
             id, value, labels = row
             if labels:
-                if id not in data:
-                    data[id] = {}
-                data[id][labels] = value
+                if id not in metrics:
+                    metrics[id] = {}
+                metrics[id][labels] = value
             else:
-                data[id] = value
+                metrics[id] = value
 
         cur.execute("DELETE FROM telemetry WHERE ping = ?1 AND lifetime = 'ping'", [self.name])
 
-        print("payload:", json.dumps(data))
+        payload = {
+            "ping_info": get_ping_info(self.name),
+            "metrics": metrics
+        }
+
+        print("payload:", json.dumps(payload))
         GLEAN_DB.commit()
 
 class Counter(Metric):
