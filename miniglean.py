@@ -2,6 +2,7 @@
 
 import sqlite3
 import json
+import uuid
 from datetime import datetime
 
 GLEAN_START_TIME = datetime.now()
@@ -16,6 +17,17 @@ CREATE TABLE IF NOT EXISTS telemetry(
   value BLOB NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (DATETIME('now')),
   UNIQUE(id, ping, labels)
+)
+""")
+GLEAN_DB.execute("""
+CREATE TABLE IF NOT EXISTS pending_pings(
+  id TEXT NOT NULL,
+  ping TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  metadata TEXT NOT NULL,
+  tries INTEGER DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (DATETIME('now')),
+  UNIQUE(id, ping)
 )
 """)
 GLEAN_DB.commit()
@@ -120,8 +132,23 @@ class Ping:
             "metrics": metrics
         }
 
-        print("payload:", json.dumps(payload))
+        metadata = json.dumps({})
+        doc_id = str(uuid.uuid4())
+
+        payload_json = json.dumps(payload)
+        cur.execute("""
+            INSERT INTO pending_pings (id, ping, payload, metadata)
+                VALUES (?1, ?2, ?3, ?4)
+            """, [
+            doc_id,
+            self.name,
+            payload_json,
+            metadata,
+        ])
+
+        print("payload:", payload_json)
         GLEAN_DB.commit()
+
 
 class Counter(Metric):
     def add(self, amount=1):
@@ -159,3 +186,10 @@ metrics_ping.submit()
 
 c.add(2)
 metrics_ping.submit()
+
+c.add(42)
+s = StringMetric("reason", "ping")
+s.set("cli")
+
+for i in range(20):
+    lc.get(f"label{i}").add(1)
