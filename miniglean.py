@@ -5,9 +5,11 @@ import json
 import uuid
 from datetime import datetime
 
+MAX_LABELS = 16
+
 GLEAN_START_TIME = datetime.now()
-GLEAN_DB = sqlite3.connect("glean.db")
-GLEAN_DB.execute('pragma journal_mode=wal')
+GLEAN_DB = sqlite3.connect(":memory:")
+GLEAN_DB.execute("pragma journal_mode=wal")
 GLEAN_DB.execute("""
 CREATE TABLE IF NOT EXISTS telemetry(
   id TEXT NOT NULL,
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS pending_pings(
 """)
 GLEAN_DB.commit()
 
+
 def get_ping_info(ping: str):
     global GLEAN_START_TIME
 
@@ -51,6 +54,7 @@ def get_ping_info(ping: str):
     }
     return ping_info
 
+
 class Metric:
     name: str
     lifetime: str
@@ -69,25 +73,31 @@ class Metric:
 
         cur = GLEAN_DB.cursor()
 
-        labels = ''
+        labels = ""
         if self.label:
             labels = label_check(self, cur)
 
         for ping in pings:
             # print(f"Recording for {self.name} in {ping}")
-            value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3", [self.name, ping, labels]).fetchone()
+            value = cur.execute(
+                "SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3",
+                [self.name, ping, labels],
+            ).fetchone()
             newvalue = fn(value and value[0])
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO telemetry (id, ping, lifetime, labels, value, updated_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, DATETIME('now'))
                 ON CONFLICT(id, ping, labels) DO UPDATE SET lifetime = excluded.lifetime, value = excluded.value, updated_at = excluded.updated_at
-            """, [
-                self.name,
-                ping,
-                self.lifetime,
-                labels,
-                newvalue,
-            ])
+            """,
+                [
+                    self.name,
+                    ping,
+                    self.lifetime,
+                    labels,
+                    newvalue,
+                ],
+            )
         GLEAN_DB.commit()
 
     def get_value(self, ping=None):
@@ -96,12 +106,16 @@ class Metric:
 
         cur = GLEAN_DB.cursor()
 
-        labels = ''
+        labels = ""
         if self.label:
             labels = self.label
 
-        value = cur.execute("SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3", [self.name, ping, labels]).fetchone()
+        value = cur.execute(
+            "SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3",
+            [self.name, ping, labels],
+        ).fetchone()
         return value and value[0]
+
 
 class Ping:
     name: str
@@ -113,7 +127,9 @@ class Ping:
         cur = GLEAN_DB.cursor()
 
         metrics = {}
-        for row in cur.execute("SELECT id, value, labels FROM telemetry WHERE ping = ?1", [self.name]).fetchall():
+        for row in cur.execute(
+            "SELECT id, value, labels FROM telemetry WHERE ping = ?1", [self.name]
+        ).fetchall():
             id, value, labels = row
             if labels:
                 if id not in metrics:
@@ -128,26 +144,28 @@ class Ping:
             else:
                 metrics[id] = value
 
-        cur.execute("DELETE FROM telemetry WHERE ping = ?1 AND lifetime = 'ping'", [self.name])
+        cur.execute(
+            "DELETE FROM telemetry WHERE ping = ?1 AND lifetime = 'ping'", [self.name]
+        )
 
-        payload = {
-            "ping_info": get_ping_info(self.name),
-            "metrics": metrics
-        }
+        payload = {"ping_info": get_ping_info(self.name), "metrics": metrics}
 
         metadata = json.dumps({})
         doc_id = str(uuid.uuid4())
 
         payload_json = json.dumps(payload, indent=2)
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO pending_pings (id, ping, payload, metadata)
                 VALUES (?1, ?2, ?3, ?4)
-            """, [
-            doc_id,
-            self.name,
-            payload_json,
-            metadata,
-        ])
+            """,
+            [
+                doc_id,
+                self.name,
+                payload_json,
+                metadata,
+            ],
+        )
 
         print("payload:", payload_json)
         GLEAN_DB.commit()
@@ -155,10 +173,12 @@ class Ping:
 
 class Counter(Metric):
     def add(self, amount=1):
-        self.record(lambda value: int(value or 0)+amount)
+        self.record(lambda value: int(value or 0) + amount)
 
 
 def label_check(this, cur):
+    global MAX_LABELS
+
     label = this.label
     if "," in label:
         labels = label.split(",")
@@ -172,21 +192,23 @@ def label_check(this, cur):
             if cat not in this.allowed_cats:
                 cat = "__other__"
         else:
-            existing_labels = cur.execute("SELECT DISTINCT labels FROM telemetry WHERE id = ?1", [this.name]).fetchall()
+            existing_labels = cur.execute(
+                "SELECT DISTINCT labels FROM telemetry WHERE id = ?1", [this.name]
+            ).fetchall()
             existing_labels = [lab[0].split(",") for lab in existing_labels]
-            keys = { lab[0] for lab in existing_labels }
-            cats = { lab[1] for lab in existing_labels }
+            keys = {lab[0] for lab in existing_labels}
+            cats = {lab[1] for lab in existing_labels}
 
             # keys is static
             if this.allowed_keys and key not in this.allowed_keys:
                 key = "__other__"
-            elif key not in keys and len(keys) >= 16:
+            elif key not in keys and len(keys) >= MAX_LABELS:
                 key = "__other__"
 
             # cat is static
             if this.allowed_cats and cat not in this.allowed_cats:
                 cat = "__other__"
-            elif cat not in cats and len(cats) >= 16:
+            elif cat not in cats and len(cats) >= MAX_LABELS:
                 cat = "__other__"
 
             pass
@@ -197,12 +219,15 @@ def label_check(this, cur):
             if label not in this.allowed_labels:
                 label = "__other__"
         else:
-            existing_labels = cur.execute("SELECT DISTINCT labels FROM telemetry WHERE id = ?1", [this.name]).fetchall()
-            existing_labels = { lab[0] for lab in existing_labels }
-            if label not in existing_labels and len(existing_labels) >= 16:
+            existing_labels = cur.execute(
+                "SELECT DISTINCT labels FROM telemetry WHERE id = ?1", [this.name]
+            ).fetchall()
+            existing_labels = {lab[0] for lab in existing_labels}
+            if label not in existing_labels and len(existing_labels) >= MAX_LABELS:
                 label = "__other__"
 
     return label
+
 
 class LabeledCounter(Metric):
     allowed_labels: set
@@ -223,14 +248,20 @@ class LabeledCounter(Metric):
 
         cur = GLEAN_DB.cursor()
 
-        value = cur.execute("SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2", [self.name, ping]).fetchall()
+        value = cur.execute(
+            "SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2",
+            [self.name, ping],
+        ).fetchall()
         return value and dict(value)
+
 
 class DualLabeledCounter(Metric):
     allowed_keys: set
     allowed_cats: set
 
-    def __init__(self, name, lifetime, send_in_pings=None, allowed_keys=None, allowed_cats=None):
+    def __init__(
+        self, name, lifetime, send_in_pings=None, allowed_keys=None, allowed_cats=None
+    ):
         super().__init__(name, lifetime, send_in_pings)
         self.allowed_keys = allowed_keys
         self.allowed_cats = allowed_cats
@@ -249,7 +280,10 @@ class DualLabeledCounter(Metric):
 
         cur = GLEAN_DB.cursor()
 
-        row = cur.execute("SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2", [self.name, ping]).fetchall()
+        row = cur.execute(
+            "SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2",
+            [self.name, ping],
+        ).fetchall()
         values = {}
         for [labels, value] in row:
             [key, cat] = labels.split(",")
@@ -265,46 +299,178 @@ class StringMetric(Metric):
         self.record(lambda _: value)
 
 
-metrics_ping = Ping("metrics")
+if __name__ == "__main__":
+    metrics_ping = Ping("metrics")
 
-c = Counter("starts", "user")
-c.add()
+    c = Counter("starts", "user")
+    c.add()
 
-c = Counter("clicks", "ping")
-c.add(2)
-c.add(2)
+    c = Counter("clicks", "ping")
+    c.add(2)
+    c.add(2)
 
-lc = LabeledCounter("errors", "ping")
-lc.get("label0").add(1)
+    lc = LabeledCounter("errors", "ping")
+    lc.get("label0").add(1)
 
-slc = LabeledCounter("static-labels", "ping", ["metrics"], {"predefined"})
-slc.get("predefined").add(1)
-slc.get("unknown").add(1)
+    slc = LabeledCounter("static-labels", "ping", ["metrics"], {"predefined"})
+    slc.get("predefined").add(1)
+    slc.get("unknown").add(1)
 
-dlc = DualLabeledCounter("dual-labels", "ping")
-dlc.get("key0", "cat0").add(1)
-dlc.get("key0", "cat1").add(1)
-dlc.get("key1", "cat0").add(1)
+    dlc = DualLabeledCounter("dual-labels", "ping")
+    dlc.get("key0", "cat0").add(1)
+    dlc.get("key0", "cat1").add(1)
+    dlc.get("key1", "cat0").add(1)
 
-sdlc = DualLabeledCounter("static-dual-labels", "ping", ["metrics"], {"predefined-key"}, {"predefined-cat"})
-sdlc.get("predefined-key", "cat0").add(1)
-sdlc.get("predefined-key", "predefined-cat").add(1)
-sdlc.get("key1", "predefined-cat").add(1)
+    sdlc = DualLabeledCounter(
+        "static-dual-labels",
+        "ping",
+        ["metrics"],
+        {"predefined-key"},
+        {"predefined-cat"},
+    )
+    sdlc.get("predefined-key", "cat0").add(1)
+    sdlc.get("predefined-key", "predefined-cat").add(1)
+    sdlc.get("key1", "predefined-cat").add(1)
 
-metrics_ping.submit()
+    metrics_ping.submit()
 
-#for i in range(20):
-#    lc.get(f"label{i}").add(1)
-#
-#s = StringMetric("reason", "ping")
-#s.set("cli")
-#
-#c.add(2)
-#metrics_ping.submit()
-#
-#c.add(42)
-#s = StringMetric("reason", "ping")
-#s.set("cli")
-#
-#for i in range(20):
-#    lc.get(f"label{i}").add(1)
+
+def test_counter():
+    c = Counter("starts", "user")
+    c.add()
+
+    assert 1 == c.get_value()
+
+    c = Counter("clicks", "ping")
+    c.add(2)
+    c.add(2)
+
+    assert 4 == c.get_value()
+
+
+def test_string():
+    s = StringMetric("reason", "ping")
+    s.set("cli")
+
+    assert "cli" == s.get_value()
+
+
+def test_labeled_counter():
+    lc = LabeledCounter("errors", "ping")
+    lc.get("label0").add(1)
+    assert {"label0": 1} == lc.get_value()
+
+
+def test_labeled_counter_many():
+    lc = LabeledCounter("many-errors", "ping")
+    for i in range(20):
+        lc.get(f"label{i}").add(1)
+
+    exp = {
+        "label0": 1,
+        "label1": 1,
+        "label2": 1,
+        "label3": 1,
+        "label4": 1,
+        "label5": 1,
+        "label6": 1,
+        "label7": 1,
+        "label8": 1,
+        "label9": 1,
+        "label10": 1,
+        "label11": 1,
+        "label12": 1,
+        "label13": 1,
+        "label14": 1,
+        "label15": 1,
+        "__other__": 4,
+    }
+    assert exp == lc.get_value()
+
+
+def test_labeled_counter_static():
+    lc = LabeledCounter("static-labeled", "ping", ["metrics"], {"predefined"})
+    lc.get("predefined").add(1)
+    lc.get("random").add(1)
+    assert {"predefined": 1, "__other__": 1} == lc.get_value()
+
+
+def test_dual_labeled_counter():
+    lc = DualLabeledCounter("dual-counter", "ping")
+    lc.get("key0", "cat0").add(1)
+    lc.get("key0", "cat1").add(1)
+    lc.get("key1", "cat0").add(1)
+
+    exp = {"key0": {"cat0": 1, "cat1": 1}, "key1": {"cat0": 1}}
+    assert exp == lc.get_value()
+
+
+def test_dual_labeled_counter_static():
+    lc = DualLabeledCounter("static-dual-counter", "ping", ["metrics"], {"key0"})
+    lc.get("key0", "cat0").add(1)
+    lc.get("key0", "cat1").add(1)
+    lc.get("key1", "cat0").add(1)
+
+    exp = {"key0": {"cat0": 1, "cat1": 1}, "__other__": {"cat0": 1}}
+    assert exp == lc.get_value()
+
+    lc = DualLabeledCounter("static-dual-counter2", "ping", ["metrics"], None, {"cat0"})
+    lc.get("key0", "cat0").add(1)
+    lc.get("key0", "cat1").add(1)
+    lc.get("key1", "cat0").add(1)
+
+    exp = {"key0": {"cat0": 1, "__other__": 1}, "key1": {"cat0": 1}}
+    assert exp == lc.get_value()
+
+    lc = DualLabeledCounter(
+        "static-dual-counter3", "ping", ["metrics"], {"key0"}, {"cat0"}
+    )
+    lc.get("key0", "cat0").add(1)
+    lc.get("key0", "cat1").add(1)
+    lc.get("key1", "cat0").add(1)
+
+    exp = {"key0": {"cat0": 1, "__other__": 1}, "__other__": {"cat0": 1}}
+    assert exp == lc.get_value()
+
+
+def test_dual_labeled_counter_many():
+    lc = DualLabeledCounter("dual-labeled-many", "ping")
+
+    for key in range(20):
+        for cat in range(5):
+            lc.get(f"key{key}", f"cat{cat}").add(1)
+
+    exp = {
+        "__other__": {
+            "cat0": 4,
+            "cat1": 4,
+            "cat2": 4,
+            "cat3": 4,
+            "cat4": 4,
+        }
+    }
+    for key in range(16):
+        for cat in range(5):
+            k = f"key{key}"
+            if k not in exp:
+                exp[k] = {}
+            exp[k][f"cat{cat}"] = 1
+
+    assert exp == lc.get_value()
+
+
+def test_dual_labeled_counter_many2():
+    lc = DualLabeledCounter("dual-labeled-many2", "ping")
+
+    for key in range(5):
+        for cat in range(20):
+            lc.get(f"key{key}", f"cat{cat}").add(1)
+
+    exp = {}
+    for key in range(5):
+        k = f"key{key}"
+        exp[k] = {"__other__": 4}
+        for cat in range(16):
+            exp[k][f"cat{cat}"] = 1
+
+    assert exp == lc.get_value()
