@@ -170,6 +170,7 @@ class Ping:
         )
         GLEAN_DB.commit()
 
+
 class Uploader:
     def get_upload_task(self):
         sql = """
