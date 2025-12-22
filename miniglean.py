@@ -3,12 +3,14 @@
 import sqlite3
 import json
 import uuid
+import random
 from datetime import datetime
 
 MAX_LABELS = 16
+MAX_TRIES = 3
 
 GLEAN_START_TIME = datetime.now()
-GLEAN_DB = sqlite3.connect(":memory:")
+GLEAN_DB = sqlite3.connect("glean.db")
 GLEAN_DB.execute("pragma journal_mode=wal")
 GLEAN_DB.execute("""
 CREATE TABLE IF NOT EXISTS telemetry(
@@ -153,7 +155,7 @@ class Ping:
         metadata = json.dumps({})
         doc_id = str(uuid.uuid4())
 
-        payload_json = json.dumps(payload, indent=2)
+        payload_json = json.dumps(payload)
         cur.execute(
             """
             INSERT INTO pending_pings (id, ping, payload, metadata)
@@ -166,9 +168,40 @@ class Ping:
                 metadata,
             ],
         )
-
-        print("payload:", payload_json)
         GLEAN_DB.commit()
+
+class Uploader:
+    def get_upload_task(self):
+        sql = """
+UPDATE pending_pings SET tries = tries+1, updated_at = DATETIME('now')
+WHERE id = (
+    SELECT id FROM pending_pings ORDER BY updated_at, tries LIMIT 1
+) RETURNING id, tries, ping, payload, metadata;
+        """
+
+        global GLEAN_DB
+        global MAX_TRIES
+
+        print("Getting upload task")
+        cur = GLEAN_DB.cursor()
+        while True:
+            value = cur.execute(sql).fetchone()
+
+            if not value:
+                print("no ping to upload")
+                break
+
+            if value[1] > MAX_TRIES:
+                cur.execute("DELETE FROM pending_pings WHERE id = ?1", [value[0]])
+                GLEAN_DB.commit()
+
+            print(f"Uploading ping '{value[2]}' ({value[0]})")
+            if random.random() < 0.5:
+                print(f"Upload succeeded for {value[0]}")
+                cur.execute("DELETE FROM pending_pings WHERE id = ?1", [value[0]])
+                GLEAN_DB.commit()
+            else:
+                print(f"Upload failed for {value[0]}")
 
 
 class Counter(Metric):
@@ -302,6 +335,9 @@ class StringMetric(Metric):
 if __name__ == "__main__":
     metrics_ping = Ping("metrics")
 
+    uploader = Uploader()
+    uploader.get_upload_task()
+
     c = Counter("starts", "user")
     c.add()
 
@@ -311,6 +347,8 @@ if __name__ == "__main__":
 
     lc = LabeledCounter("errors", "ping")
     lc.get("label0").add(1)
+
+    metrics_ping.submit()
 
     slc = LabeledCounter("static-labels", "ping", ["metrics"], {"predefined"})
     slc.get("predefined").add(1)
@@ -333,6 +371,8 @@ if __name__ == "__main__":
     sdlc.get("key1", "predefined-cat").add(1)
 
     metrics_ping.submit()
+
+    uploader.get_upload_task()
 
 
 def test_counter():
