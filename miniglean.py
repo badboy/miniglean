@@ -71,10 +71,7 @@ class Metric:
 
         labels = ''
         if self.label:
-            labels = self.label
-            label_cnt = cur.execute("SELECT COUNT(DISTINCT labels) FROM telemetry WHERE id = ?1", [self.name]).fetchone()[0]
-            if label_cnt >= 16:
-                labels = "__other__"
+            labels = label_check(self, cur)
 
         for ping in pings:
             # print(f"Recording for {self.name} in {ping}")
@@ -121,7 +118,13 @@ class Ping:
             if labels:
                 if id not in metrics:
                     metrics[id] = {}
-                metrics[id][labels] = value
+                if "," in labels:
+                    labels = labels.split(",")
+                    if labels[0] not in metrics[id]:
+                        metrics[id][labels[0]] = {}
+                    metrics[id][labels[0]][labels[1]] = value
+                else:
+                    metrics[id][labels] = value
             else:
                 metrics[id] = value
 
@@ -135,7 +138,7 @@ class Ping:
         metadata = json.dumps({})
         doc_id = str(uuid.uuid4())
 
-        payload_json = json.dumps(payload)
+        payload_json = json.dumps(payload, indent=2)
         cur.execute("""
             INSERT INTO pending_pings (id, ping, payload, metadata)
                 VALUES (?1, ?2, ?3, ?4)
@@ -155,16 +158,89 @@ class Counter(Metric):
         self.record(lambda value: int(value or 0)+amount)
 
 
+def label_check(this, cur):
+    label = this.label
+    if "," in label:
+        labels = label.split(",")
+        key = labels[0]
+        cat = labels[1]
+
+        # keys AND cats are static:
+        if this.allowed_keys and this.allowed_cats:
+            if key not in this.allowed_keys:
+                key = "__other__"
+            if cat not in this.allowed_cats:
+                cat = "__other__"
+        else:
+            existing_labels = cur.execute("SELECT DISTINCT labels FROM telemetry WHERE id = ?1", [this.name]).fetchall()
+            existing_labels = [lab[0].split(",") for lab in existing_labels]
+            keys = { lab[0] for lab in existing_labels }
+            cats = { lab[1] for lab in existing_labels }
+
+            # keys is static
+            if this.allowed_keys and key not in this.allowed_keys:
+                key = "__other__"
+            elif key not in keys and len(keys) >= 16:
+                key = "__other__"
+
+            # cat is static
+            if this.allowed_cats and cat not in this.allowed_cats:
+                cat = "__other__"
+            elif cat not in cats and len(cats) >= 16:
+                cat = "__other__"
+
+            pass
+
+        label = f"{key},{cat}"
+    else:
+        if this.allowed_labels:
+            if label not in this.allowed_labels:
+                label = "__other__"
+        else:
+            existing_labels = cur.execute("SELECT DISTINCT labels FROM telemetry WHERE id = ?1", [this.name]).fetchall()
+            existing_labels = { lab[0] for lab in existing_labels }
+            if label not in existing_labels and len(existing_labels) >= 16:
+                label = "__other__"
+
+    return label
+
 class LabeledCounter(Metric):
+    allowed_labels: set
+
+    def __init__(self, name, lifetime, send_in_pings=None, allowed_labels=None):
+        super().__init__(name, lifetime, send_in_pings)
+        self.allowed_labels = allowed_labels
+
     def get(self, label):
         c = Counter(self.name, self.lifetime, self.send_in_pings)
         c.label = label
+        c.allowed_labels = self.allowed_labels
+        return c
+
+class DualLabeledCounter(Metric):
+    allowed_keys: set
+    allowed_cats: set
+
+    def __init__(self, name, lifetime, send_in_pings=None, allowed_keys=None, allowed_cats=None):
+        super().__init__(name, lifetime, send_in_pings)
+        self.allowed_keys = allowed_keys
+        self.allowed_cats = allowed_cats
+        self.allowed_labels = None
+
+    def get(self, key, cat):
+        c = Counter(self.name, self.lifetime, self.send_in_pings)
+        c.label = f"{key},{cat}"
+        c.allowed_keys = self.allowed_keys
+        c.allowed_cats = self.allowed_cats
         return c
 
 
 class StringMetric(Metric):
     def set(self, value):
         self.record(lambda _: value)
+
+
+metrics_ping = Ping("metrics")
 
 c = Counter("starts", "user")
 c.add()
@@ -174,22 +250,36 @@ c.add(2)
 c.add(2)
 
 lc = LabeledCounter("errors", "ping")
+lc.get("label0").add(1)
 
-for i in range(20):
-    lc.get(f"label{i}").add(1)
+slc = LabeledCounter("static-labels", "ping", ["metrics"], {"predefined"})
+slc.get("predefined").add(1)
+slc.get("unknown").add(1)
 
-s = StringMetric("reason", "ping")
-s.set("cli")
+dlc = DualLabeledCounter("dual-labels", "ping")
+dlc.get("key0", "cat0").add(1)
+dlc.get("key0", "cat1").add(1)
+dlc.get("key1", "cat0").add(1)
 
-metrics_ping = Ping("metrics")
+sdlc = DualLabeledCounter("static-dual-labels", "ping", ["metrics"], {"predefined-key"}, {"predefined-cat"})
+sdlc.get("predefined-key", "cat0").add(1)
+sdlc.get("predefined-key", "predefined-cat").add(1)
+sdlc.get("key1", "predefined-cat").add(1)
+
 metrics_ping.submit()
 
-c.add(2)
-metrics_ping.submit()
-
-c.add(42)
-s = StringMetric("reason", "ping")
-s.set("cli")
-
-for i in range(20):
-    lc.get(f"label{i}").add(1)
+#for i in range(20):
+#    lc.get(f"label{i}").add(1)
+#
+#s = StringMetric("reason", "ping")
+#s.set("cli")
+#
+#c.add(2)
+#metrics_ping.submit()
+#
+#c.add(42)
+#s = StringMetric("reason", "ping")
+#s.set("cli")
+#
+#for i in range(20):
+#    lc.get(f"label{i}").add(1)
