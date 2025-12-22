@@ -217,6 +217,15 @@ class LabeledCounter(Metric):
         c.allowed_labels = self.allowed_labels
         return c
 
+    def get_value(self, ping=None):
+        global GLEAN_DB
+        ping = ping or self.send_in_pings[0]
+
+        cur = GLEAN_DB.cursor()
+
+        value = cur.execute("SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2", [self.name, ping]).fetchall()
+        return value and dict(value)
+
 class DualLabeledCounter(Metric):
     allowed_keys: set
     allowed_cats: set
@@ -233,6 +242,22 @@ class DualLabeledCounter(Metric):
         c.allowed_keys = self.allowed_keys
         c.allowed_cats = self.allowed_cats
         return c
+
+    def get_value(self, ping=None):
+        global GLEAN_DB
+        ping = ping or self.send_in_pings[0]
+
+        cur = GLEAN_DB.cursor()
+
+        row = cur.execute("SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2", [self.name, ping]).fetchall()
+        values = {}
+        for [labels, value] in row:
+            [key, cat] = labels.split(",")
+            if key not in values:
+                values[key] = {}
+            values[key][cat] = value
+
+        return values
 
 
 class StringMetric(Metric):
