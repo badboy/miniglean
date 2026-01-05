@@ -5,6 +5,7 @@ import json
 import uuid
 import random
 from datetime import datetime
+from collections import defaultdict
 
 MAX_LABELS = 16
 MAX_TRIES = 3
@@ -128,18 +129,14 @@ class Ping:
     def submit(self):
         cur = GLEAN_DB.cursor()
 
-        metrics = {}
+        metrics = defaultdict(lambda: defaultdict(dict))
         for row in cur.execute(
             "SELECT id, value, labels FROM telemetry WHERE ping = ?1", [self.name]
         ).fetchall():
             id, value, labels = row
             if labels:
-                if id not in metrics:
-                    metrics[id] = {}
                 if "," in labels:
                     labels = labels.split(",")
-                    if labels[0] not in metrics[id]:
-                        metrics[id][labels[0]] = {}
                     metrics[id][labels[0]][labels[1]] = value
                 else:
                     metrics[id][labels] = value
@@ -318,11 +315,9 @@ class DualLabeledCounter(Metric):
             "SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2",
             [self.name, ping],
         ).fetchall()
-        values = {}
+        values = defaultdict(dict)
         for [labels, value] in row:
             [key, cat] = labels.split(",")
-            if key not in values:
-                values[key] = {}
             values[key][cat] = value
 
         return values
