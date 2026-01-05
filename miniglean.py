@@ -11,9 +11,10 @@ MAX_LABELS = 16
 MAX_TRIES = 3
 
 GLEAN_START_TIME = datetime.now()
-GLEAN_DB = sqlite3.connect("glean.db")
-GLEAN_DB.execute("pragma journal_mode=wal")
-GLEAN_DB.execute("""
+GLEAN_GLOBAL = None
+PRAGMA = "PRAGMA journal_mode=wal"
+SCHEMA = """
+BEGIN;
 CREATE TABLE IF NOT EXISTS telemetry(
   id TEXT NOT NULL,
   ping TEXT NOT NULL,
@@ -22,9 +23,7 @@ CREATE TABLE IF NOT EXISTS telemetry(
   value BLOB NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (DATETIME('now')),
   UNIQUE(id, ping, labels)
-)
-""")
-GLEAN_DB.execute("""
+);
 CREATE TABLE IF NOT EXISTS pending_pings(
   id TEXT NOT NULL,
   ping TEXT NOT NULL,
@@ -33,10 +32,32 @@ CREATE TABLE IF NOT EXISTS pending_pings(
   tries INTEGER DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (DATETIME('now')),
   UNIQUE(id, ping)
-)
-""")
-GLEAN_DB.commit()
+);
+COMMIT;
+"""
 
+class Glean:
+    data_path: str
+    database: sqlite3.Database
+
+    def __init__(self, data_path):
+        global GLEAN_GLOBAL
+        self.data_path = data_path
+        self.database = sqlite3.connect(data_path)
+
+        self.setup()
+        GLEAN_GLOBAL = self
+
+    def setup(self):
+        self.database.execute(PRAGMA)
+        self.database.executescript(SCHEMA)
+        self.database.commit()
+
+    def cursor(self):
+        return self.database.cursor()
+
+    def commit(self):
+        return self.database.commit()
 
 def get_ping_info(ping: str):
     global GLEAN_START_TIME
@@ -71,10 +92,10 @@ class Metric:
         self.label = None
 
     def record(self, fn):
-        global GLEAN_DB
+        global GLEAN_GLOBAL
         pings = self.send_in_pings
 
-        cur = GLEAN_DB.cursor()
+        cur = GLEAN_GLOBAL.cursor()
 
         labels = ""
         if self.label:
@@ -101,13 +122,13 @@ class Metric:
                     newvalue,
                 ],
             )
-        GLEAN_DB.commit()
+        GLEAN_GLOBAL.commit()
 
     def get_value(self, ping=None):
-        global GLEAN_DB
+        global GLEAN_GLOBAL
         ping = ping or self.send_in_pings[0]
 
-        cur = GLEAN_DB.cursor()
+        cur = GLEAN_GLOBAL.cursor()
 
         labels = ""
         if self.label:
@@ -127,7 +148,7 @@ class Ping:
         self.name = name
 
     def submit(self):
-        cur = GLEAN_DB.cursor()
+        cur = GLEAN_GLOBAL.cursor()
 
         metrics = defaultdict(lambda: defaultdict(dict))
         for row in cur.execute(
@@ -165,7 +186,7 @@ class Ping:
                 metadata,
             ],
         )
-        GLEAN_DB.commit()
+        GLEAN_GLOBAL.commit()
 
 
 class Uploader:
@@ -177,11 +198,11 @@ WHERE id = (
 ) RETURNING id, tries, ping, payload, metadata;
         """
 
-        global GLEAN_DB
+        global GLEAN_GLOBAL
         global MAX_TRIES
 
         print("Getting upload task")
-        cur = GLEAN_DB.cursor()
+        cur = GLEAN_GLOBAL.cursor()
         while True:
             value = cur.execute(sql).fetchone()
 
@@ -191,13 +212,13 @@ WHERE id = (
 
             if value[1] > MAX_TRIES:
                 cur.execute("DELETE FROM pending_pings WHERE id = ?1", [value[0]])
-                GLEAN_DB.commit()
+                GLEAN_GLOBAL.commit()
 
             print(f"Uploading ping '{value[2]}' ({value[0]})")
             if random.random() < 0.5:
                 print(f"Upload succeeded for {value[0]}")
                 cur.execute("DELETE FROM pending_pings WHERE id = ?1", [value[0]])
-                GLEAN_DB.commit()
+                GLEAN_GLOBAL.commit()
             else:
                 print(f"Upload failed for {value[0]}")
 
@@ -274,10 +295,10 @@ class LabeledCounter(Metric):
         return c
 
     def get_value(self, ping=None):
-        global GLEAN_DB
+        global GLEAN_GLOBAL
         ping = ping or self.send_in_pings[0]
 
-        cur = GLEAN_DB.cursor()
+        cur = GLEAN_GLOBAL.cursor()
 
         value = cur.execute(
             "SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2",
@@ -306,10 +327,10 @@ class DualLabeledCounter(Metric):
         return c
 
     def get_value(self, ping=None):
-        global GLEAN_DB
+        global GLEAN_GLOBAL
         ping = ping or self.send_in_pings[0]
 
-        cur = GLEAN_DB.cursor()
+        cur = GLEAN_GLOBAL.cursor()
 
         row = cur.execute(
             "SELECT labels, value FROM telemetry WHERE id = ?1 AND ping = ?2",
@@ -329,6 +350,8 @@ class StringMetric(Metric):
 
 
 if __name__ == "__main__":
+    Glean("glean.db")
+
     metrics_ping = Ping("metrics")
 
     uploader = Uploader()
@@ -369,6 +392,9 @@ if __name__ == "__main__":
     metrics_ping.submit()
 
     uploader.get_upload_task()
+
+def setup_function(function):
+    Glean(":memory:")
 
 
 def test_counter():
