@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS pending_pings(
 COMMIT;
 """
 
+
 class Glean:
     data_path: str
     database: sqlite3.Database
@@ -58,6 +59,7 @@ class Glean:
 
     def commit(self):
         return self.database.commit()
+
 
 def get_ping_info(ping: str):
     global GLEAN_START_TIME
@@ -392,6 +394,7 @@ if __name__ == "__main__":
     metrics_ping.submit()
 
     uploader.get_upload_task()
+
 
 def setup_function(function):
     Glean(":memory:")
