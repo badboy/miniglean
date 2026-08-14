@@ -12,7 +12,22 @@ MAX_TRIES = 3
 
 GLEAN_START_TIME = datetime.now()
 GLEAN_GLOBAL = None
-PRAGMA = "PRAGMA journal_mode=wal"
+PRAGMA = """
+-- we unconditionally want write-ahead-logging mode
+PRAGMA journal_mode = WAL;
+-- Sync at the most criticial moments, but not with every write
+PRAGMA synchronous = NORMAL;
+-- limit size of the journal. TODO(bug 2049290): value currently arbitrary.
+-- needs refinement.
+PRAGMA journal_size_limit = 512000; -- 512 KB.
+-- We don't care about temp tables being persisted to disk
+PRAGMA temp_store = MEMORY;
+-- allows adding incremental cleanup later
+PRAGMA auto_vacuum = INCREMENTAL;
+-- How long to wait for a lock before returning SQLITE_BUSY (in ms)
+PRAGMA busy_timeout = 5000;
+"""
+
 SCHEMA = """
 BEGIN;
 CREATE TABLE IF NOT EXISTS telemetry(
@@ -40,19 +55,43 @@ COMMIT;
 class Glean:
     data_path: str
     database: sqlite3.Database
+    delay_ping_lifetime_io: Boolean
 
-    def __init__(self, data_path):
+    def __init__(self, data_path, delay_ping_lifetime_io=False):
         global GLEAN_GLOBAL
         self.data_path = data_path
         self.database = sqlite3.connect(data_path)
+        self.delay_ping_lifetime_io = delay_ping_lifetime_io
 
         self.setup()
         GLEAN_GLOBAL = self
 
     def setup(self):
-        self.database.execute(PRAGMA)
+        self.database.executescript(PRAGMA)
         self.database.executescript(SCHEMA)
         self.database.commit()
+        self.load_ping_lifetime()
+
+    def load_ping_lifetime(self):
+        if not self.delay_ping_lifetime_io:
+            return
+
+        self.database.executescript("ATTACH DATABASE 'file::memory:' AS lifetime_ping")
+        schema = SCHEMA.replace("EXISTS telemetry", "EXISTS lifetime_ping.telemetry")
+        self.database.executescript(schema)
+        self.database.executescript("INSERT INTO lifetime_ping.telemetry SELECT * FROM telemetry WHERE lifetime = 'ping'")
+
+    def persist_ping_lifetime(self):
+        if not self.delay_ping_lifetime_io:
+            return
+
+        self.database.executescript(
+        """
+            INSERT INTO telemetry SELECT * FROM lifetime_ping.telemetry WHERE true
+            ON CONFLICT(id, ping, labels) DO UPDATE SET
+              lifetime = excluded.lifetime,
+              value = excluded.value
+        """)
 
     def cursor(self):
         return self.database.cursor()
@@ -103,6 +142,10 @@ class Metric:
         if self.label:
             labels = label_check(self, cur)
 
+        table = "telemetry"
+        if GLEAN_GLOBAL.delay_ping_lifetime_io and self.lifetime == "ping":
+            table = "lifetime_ping.telemetry"
+
         for ping in pings:
             # print(f"Recording for {self.name} in {ping}")
             value = cur.execute(
@@ -111,8 +154,8 @@ class Metric:
             ).fetchone()
             newvalue = fn(value and value[0])
             cur.execute(
-                """
-                INSERT INTO telemetry (id, ping, lifetime, labels, value, updated_at)
+            f"""
+                INSERT INTO {table} (id, ping, lifetime, labels, value, updated_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, DATETIME('now'))
                 ON CONFLICT(id, ping, labels) DO UPDATE SET lifetime = excluded.lifetime, value = excluded.value, updated_at = excluded.updated_at
             """,
@@ -136,8 +179,12 @@ class Metric:
         if self.label:
             labels = self.label
 
+        table = "telemetry"
+        if GLEAN_GLOBAL.delay_ping_lifetime_io and self.lifetime == "ping":
+            table = "lifetime_ping.telemetry"
+
         value = cur.execute(
-            "SELECT value FROM telemetry WHERE id = ?1 AND ping = ?2 AND labels = ?3",
+            f"SELECT value FROM {table} WHERE id = ?1 AND ping = ?2 AND labels = ?3",
             [self.name, ping, labels],
         ).fetchone()
         return value and value[0]
@@ -150,6 +197,7 @@ class Ping:
         self.name = name
 
     def submit(self):
+        GLEAN_GLOBAL.persist_ping_lifetime()
         cur = GLEAN_GLOBAL.cursor()
 
         metrics = defaultdict(lambda: defaultdict(dict))
@@ -352,7 +400,7 @@ class StringMetric(Metric):
 
 
 if __name__ == "__main__":
-    Glean("glean.db")
+    Glean("glean.db", delay_ping_lifetime_io=True)
 
     metrics_ping = Ping("metrics")
 
@@ -390,6 +438,9 @@ if __name__ == "__main__":
     sdlc.get("predefined-key", "cat0").add(1)
     sdlc.get("predefined-key", "predefined-cat").add(1)
     sdlc.get("key1", "predefined-cat").add(1)
+
+    for i in range(500000*2):
+        c.add()
 
     metrics_ping.submit()
 
